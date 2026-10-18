@@ -1,0 +1,49 @@
+{
+    "name": "phattarachai/worktree-prompt",
+    "description": "Set up a git worktree of a Laravel project in one command — real vendor, .env, storage, an optional database of its own and build assets — and tear it down again, through Laravel Prompts. One global command for every project.",
+    "keywords": ["git", "worktree", "laravel", "cli", "terminal", "laravel-prompts", "postgres", "mysql"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Phattarachai",
+            "email": "pc@phattarachai.dev"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "ext-pdo": "*",
+        "laravel/prompts": "^0.3.13",
+        "symfony/console": "^7.0|^8.0",
+        "symfony/process": "^7.0|^8.0"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.24",
+        "mockery/mockery": "^1.6",
+        "pestphp/pest": "^3.0|^4.0",
+        "phpstan/phpstan": "^2.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Phattarachai\\WorktreePrompt\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Phattarachai\\WorktreePrompt\\Tests\\": "tests/"
+        }
+    },
+    "bin": ["bin/lwt"],
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "scripts": {
+        "test": "vendor/bin/pest",
+        "analyse": "vendor/bin/phpstan analyse",
+        "format": "vendor/bin/pint"
+    }
+}

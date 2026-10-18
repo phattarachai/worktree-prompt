@@ -1,0 +1,19 @@
+#!/usr/bin/env php
+<?php
+
+// Stands in for Laravel's artisan: --version boots the autoloader, migrate records how it was called.
+require __DIR__.'/vendor/autoload.php';
+
+$arguments = array_slice($argv, 1);
+
+if (($arguments[0] ?? '') === '--version') {
+    echo 'Laravel Framework 13.0.0 ('.App\Greeting::FROM.")\n";
+    exit(0);
+}
+
+if (($arguments[0] ?? '') === 'migrate') {
+    file_put_contents(__DIR__.'/.migrated', implode(' ', $arguments).' DB_DATABASE='.getenv('DB_DATABASE'));
+    exit(0);
+}
+
+exit(1);

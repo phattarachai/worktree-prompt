@@ -1,0 +1,10 @@
+/vendor
+/node_modules
+/public/build
+/public/hot
+/public/storage
+/.cache
+.env
+.env.local
+.migrated
+database/*.sqlite

@@ -1,0 +1,11 @@
+#!/usr/bin/env php
+<?php
+
+foreach ([__DIR__.'/../../../autoload.php', __DIR__.'/../vendor/autoload.php'] as $autoload) {
+    if (file_exists($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+
+exit((new Phattarachai\WorktreePrompt\Application)->run(array_slice($argv, 1), (string) getcwd()));
