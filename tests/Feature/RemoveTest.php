@@ -97,3 +97,160 @@ it('prunes a worktree whose folder was deleted by hand', function () {
         ->and($project->git('worktree', 'list'))->not->toContain('app-gone')
         ->and($project->git('branch', '--list', 'feat/gone'))->toBe('');
 });
+
+it('removes a clean worktree without --force', function () {
+    $project = project();
+    $project->worktree('feat/plain');
+
+    [$code] = lwt(['remove', 'feat/plain', '-n'], $project->path);
+
+    expect($code)->toBe(0)
+        ->and($this->runner->ran('git', 'worktree', 'remove', '--force'))->toBeFalse();
+});
+
+it('removes a worktree whose submodules were never initialized without --force', function () {
+    $project = project();
+    $project->submodule();
+    $worktree = $project->worktree('feat/sub');
+
+    [$code] = lwt(['remove', 'feat/sub', '-n'], $project->path);
+
+    expect($code)->toBe(0)
+        ->and(is_dir($worktree))->toBeFalse()
+        ->and($this->runner->ran('git', 'worktree', 'remove', '--force'))->toBeFalse();
+});
+
+it('removes a worktree with a clean, pushed submodule using --force, only because git insists', function () {
+    $project = project();
+    $project->submodule();
+    $worktree = $project->worktree('feat/sub');
+    TestProject::initSubmodules($worktree);
+
+    [$code, $output] = lwt(['remove', 'feat/sub', '-n'], $project->path);
+
+    expect($code)->toBe(0)
+        ->and($output)->toContain('git worktree remove --force')
+        ->and(is_dir($worktree))->toBeFalse()
+        ->and($project->git('worktree', 'list'))->not->toContain('app-sub');
+});
+
+it('checks the worktree itself before using --force', function () {
+    $project = project();
+    $project->submodule();
+    $worktree = $project->worktree('feat/sub');
+    TestProject::initSubmodules($worktree);
+    file_put_contents("{$worktree}/notes.txt", 'wip');
+
+    [$code, $output] = lwt(['remove', 'feat/sub', '-n'], $project->path);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain('1 uncommitted or untracked file(s): notes.txt')
+        ->and(is_file("{$worktree}/notes.txt"))->toBeTrue();
+});
+
+it('refuses, and names what would be lost in a submodule', function (Closure $spoil, string $named) {
+    $project = project();
+    $project->submodule();
+    $worktree = $project->worktree('feat/sub');
+    TestProject::initSubmodules($worktree);
+    $spoil("{$worktree}/lib", $worktree);
+
+    [$code, $output] = lwt(['remove', 'feat/sub', '-n'], $project->path);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain($named)
+        ->and($this->runner->ran('git', 'worktree', 'remove'))->toBeFalse()
+        ->and(is_dir($worktree))->toBeTrue();
+})->with([
+    'a changed file' => [fn (string $lib) => file_put_contents("{$lib}/lib.txt", "changed\n"), 'lib has 1 uncommitted or untracked file(s): lib.txt'],
+    'an untracked file' => [fn (string $lib) => file_put_contents("{$lib}/new.txt", 'new'), 'lib has 1 uncommitted or untracked file(s): new.txt'],
+    'a commit on HEAD' => [fn (string $lib) => TestProject::commit($lib, 'work.txt'), 'lib has 1 commit(s) no remote has'],
+    'a commit on a branch it left' => [function (string $lib) {
+        TestProject::exec($lib, ['git', 'switch', '--quiet', '-c', 'wip']);
+        TestProject::commit($lib, 'work.txt');
+        TestProject::exec($lib, ['git', 'switch', '--quiet', '--detach', 'origin/main']);
+    }, 'lib has 1 commit(s) no remote has'],
+    'a stash' => [function (string $lib) {
+        file_put_contents("{$lib}/lib.txt", "changed\n");
+        TestProject::exec($lib, ['git', '-c', 'user.name=T', '-c', 'user.email=t@example.com', 'stash', '--quiet']);
+    }, 'lib has a stash'],
+    'a commit it moved to without committing that here' => [function (string $lib) {
+        TestProject::commit($lib, 'work.txt');
+        TestProject::exec($lib, ['git', 'push', '--quiet', 'origin', 'HEAD:refs/heads/pushed']);
+    }, 'lib is on a commit this worktree hasn\'t committed'],
+    'a commit in a submodule since deinitialized' => [function (string $lib, string $worktree) {
+        TestProject::commit($lib, 'work.txt');
+        TestProject::exec($lib, ['git', 'switch', '--quiet', '-c', 'wip']);
+        TestProject::exec($lib, ['git', 'switch', '--quiet', '--detach', 'origin/main']);
+        TestProject::exec($worktree, ['git', 'submodule', '--quiet', 'deinit', 'lib']);
+    }, 'lib (not checked out) has 1 commit(s) no remote has'],
+]);
+
+it('looks into nested submodules too', function () {
+    $project = project();
+    $project->submodule();
+    $lib = "{$project->root}/lib-checkout";
+    TestProject::exec($project->root, ['git', 'clone', '--quiet', 'lib.git', 'lib-checkout']);
+    $project->submodule('inner', 'inner', $lib);
+    $worktree = $project->worktree('feat/nested');
+    TestProject::exec("{$worktree}", ['git', '-c', 'protocol.file.allow=always', 'submodule', '--quiet', 'update', '--init', '--remote', 'lib']);
+    TestProject::initSubmodules("{$worktree}/lib");
+    TestProject::commit("{$worktree}/lib", 'pin.txt');
+    TestProject::exec("{$worktree}/lib", ['git', 'push', '--quiet', 'origin', 'HEAD:refs/heads/pushed']);
+    TestProject::commit($worktree, 'pin.txt');
+    TestProject::commit("{$worktree}/lib/inner", 'work.txt');
+
+    [$code, $output] = lwt(['remove', 'feat/nested', '-n'], $project->path);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain('lib/inner has 1 commit(s) no remote has')
+        ->and(is_dir($worktree))->toBeTrue();
+});
+
+it('finds the repository from a worktree\'s path, whatever folder it runs from', function (Closure $from) {
+    $project = project();
+    $worktree = $project->worktree('feat/far');
+
+    [$code, $output] = lwt(['remove', $worktree, '-n', '--delete-branch'], $from($project->root));
+
+    expect($code)->toBe(0)
+        ->and($output)->toContain('removed')
+        ->and(is_dir($worktree))->toBeFalse()
+        ->and($project->git('branch', '--list', 'feat/far'))->toBe('');
+})->with([
+    'outside any repository' => [function (string $root) {
+        mkdir("{$root}/plain");
+
+        return "{$root}/plain";
+    }],
+    'in another repository' => [function (string $root) {
+        TestProject::exec($root, ['git', 'init', '--quiet', 'unrelated']);
+
+        return "{$root}/unrelated";
+    }],
+    'a folder that no longer exists' => [fn () => ''],
+]);
+
+it('says what to do when a branch name can\'t be looked up from here', function (Closure $from, string $message) {
+    $project = project();
+    $worktree = $project->worktree('feat/far');
+
+    [$code, $output] = lwt(['remove', 'feat/far', '-n'], $from($project->root));
+
+    expect($code)->toBe(1)
+        ->and(str_replace("\n", ' ', (string) preg_replace('/\s+/', ' ', $output)))->toContain($message)
+        ->and(is_dir($worktree))->toBeTrue();
+})->with([
+    'outside any repository' => [function (string $root) {
+        mkdir("{$root}/plain");
+
+        return "{$root}/plain";
+    }, 'Not inside a git repository — cd into the project'],
+    'in another repository' => [function (string $root) {
+        TestProject::exec($root, ['git', 'init', '--quiet', 'unrelated']);
+        TestProject::exec("{$root}/unrelated", ['git', '-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '--quiet', '--allow-empty', '-m', 'Init']);
+
+        return "{$root}/unrelated";
+    }, 'unrelated has no worktrees besides the main checkout'],
+    'a folder that no longer exists' => [fn () => '', 'The current folder no longer exists — cd into the project'],
+]);

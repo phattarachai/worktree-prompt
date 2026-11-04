@@ -95,6 +95,8 @@ class Git
 
     /**
      * Where a branch is checked out, if anywhere.
+     *
+     * @phpstan-impure
      */
     public function worktreeOf(string $branch): ?string
     {
@@ -109,12 +111,19 @@ class Git
 
     /**
      * `git status --porcelain`, keyed by path: what is modified, staged, deleted or new (ignored files excluded).
+     * A submodule counts as changed whatever its `ignore` setting says, as it does for `git worktree remove`.
      *
      * @return array<string, string>
      */
     public function status(): array
     {
-        $entries = explode("\0", $this->run(['status', '--porcelain=v1', '-z', '--untracked-files=all'])->output);
+        $result = $this->run(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none']);
+
+        if ($result->failed()) {
+            throw new UserError("git status failed in {$this->cwd}: {$result->allOutput()}");
+        }
+
+        $entries = explode("\0", $result->output);
         $status = [];
 
         for ($index = 0; $index < count($entries); $index++) {
@@ -133,6 +142,78 @@ class Git
         }
 
         return $status;
+    }
+
+    /**
+     * The populated submodules, nested ones included, as paths from this checkout. The ones never initialized
+     * have an empty folder and nothing to lose.
+     *
+     * @return list<string>
+     */
+    public function submodules(): array
+    {
+        $submodules = [];
+
+        foreach (explode("\0", $this->run(['ls-files', '--stage', '-z'])->output) as $entry) {
+            if (! str_starts_with($entry, '160000 ')) {
+                continue;
+            }
+
+            $path = substr($entry, (int) strpos($entry, "\t") + 1);
+
+            if (file_exists("{$this->cwd}/{$path}/.git")) {
+                $nested = (new self($this->runner, "{$this->cwd}/{$path}"))->submodules();
+                array_push($submodules, $path, ...array_map(fn (string $inner) => "{$path}/{$inner}", $nested));
+            }
+        }
+
+        return array_values(array_unique($submodules));
+    }
+
+    /**
+     * The submodule repositories in this checkout's admin folder, real paths: `git submodule deinit` empties the
+     * folder and leaves its repository here, commits and all.
+     *
+     * @return list<string>
+     */
+    public function submoduleRepositories(): array
+    {
+        return self::repositoriesIn($this->gitDir().'/modules');
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function repositoriesIn(string $folder): array
+    {
+        $repositories = [];
+
+        foreach (is_dir($folder) ? array_diff(scandir($folder) ?: [], ['.', '..']) : [] as $name) {
+            $path = "{$folder}/{$name}";
+
+            // A submodule's name can have slashes, so `modules/docs/lib` is a repository two folders down.
+            array_push($repositories, ...match (true) {
+                is_dir("{$path}/objects") => [(string) realpath($path), ...self::repositoriesIn("{$path}/modules")],
+                is_dir($path) => self::repositoriesIn($path),
+                default => [],
+            });
+        }
+
+        return $repositories;
+    }
+
+    /**
+     * Commits on HEAD or a local branch that no remote-tracking branch has: only this repository holds them.
+     */
+    public function commitsOnlyHere(): int
+    {
+        $result = $this->run(['rev-list', '--count', 'HEAD', '--branches', '--not', '--remotes']);
+
+        if ($result->failed()) {
+            throw new UserError("git rev-list failed in {$this->cwd}: {$result->allOutput()}");
+        }
+
+        return (int) trim($result->output);
     }
 
     public function isTracked(string $path): bool

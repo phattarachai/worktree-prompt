@@ -64,8 +64,15 @@ class Add extends Command
             default => ['git', 'worktree', 'add', $path, $branch],
         };
 
-        if ($this->console->run($command, $main)->failed()) {
-            return 1;
+        $added = $this->console->run($command, $main);
+
+        if ($added->failed()) {
+            // git removes the folder on a failure of its own, and passes on a post-checkout hook's exit code once the worktree is complete.
+            if ($mainGit->worktreeOf($branch) === null) {
+                return 1;
+            }
+
+            $this->console->warn("The post-checkout hook failed (exit {$added->exitCode}) — the worktree is complete, so the setup goes on. Whatever else the hook does didn't finish; its output is above.");
         }
 
         $this->console->done('worktree — '.match (true) {

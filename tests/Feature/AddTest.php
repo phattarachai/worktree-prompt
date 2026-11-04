@@ -1,6 +1,8 @@
 <?php
 
 use Laravel\Prompts\Key;
+use Phattarachai\WorktreePrompt\Result;
+use Phattarachai\WorktreePrompt\Tests\FakeRunner;
 use Phattarachai\WorktreePrompt\Tests\TestProject;
 
 it('branches from origin/main with --no-track, beside the main checkout, and sets it up', function () {
@@ -55,6 +57,50 @@ it('refuses a branch checked out in another worktree, and a folder that is in us
         ->and($busyOutput)->toContain('already checked out at')
         ->and($taken)->toBe(1)
         ->and($takenOutput)->toContain('already exists and isn\'t empty');
+});
+
+it('warns about a failing post-checkout hook, sets the worktree up anyway and exits 0', function () {
+    $project = project();
+    $project->postCheckoutHook(3);
+
+    [$code, $output] = lwt(['add', 'feat/hooked', '-n'], $project->path);
+    $path = "{$project->root}/app-hooked";
+
+    expect($code)->toBe(0)
+        ->and($output)->toContain('sync: hook went wrong')
+        ->and($output)->toContain('! The post-checkout hook failed (exit 3)')
+        ->and($output)->toContain('new branch feat/hooked from origin/main')
+        ->and(is_file("{$path}/vendor/autoload.php"))->toBeTrue()
+        ->and(is_file("{$path}/.env"))->toBeTrue();
+});
+
+it('still exits non-zero when the setup after a failing hook fails', function () {
+    $project = project();
+    $project->postCheckoutHook(3);
+    $runner = new FakeRunner(fakes: ['composer' => fn () => new Result(1, '', 'composer went wrong')]);
+
+    [$code, $output] = lwt(['add', 'feat/hooked', '-n', '--vendor=install'], $project->path, $runner);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain('! The post-checkout hook failed (exit 3)')
+        ->and($output)->toContain('composer install failed');
+});
+
+it('does not take a real git worktree add failure for a hook failure', function () {
+    $project = project();
+    $project->write('.gitattributes', "README.md filter=broken\n");
+    $project->git('add', '--all');
+    $project->git('commit', '--quiet', '-m', 'Filter');
+    $project->git('push', '--quiet', 'origin', 'main');
+    $project->git('config', 'filter.broken.smudge', 'false');
+    $project->git('config', 'filter.broken.required', 'true');
+    $project->postCheckoutHook(3);
+
+    [$code, $output] = lwt(['add', 'feat/broken', '-n', '--no-fetch'], $project->path);
+
+    expect($code)->not->toBe(0)
+        ->and($output)->not->toContain('post-checkout')
+        ->and(is_dir("{$project->root}/app-broken"))->toBeFalse();
 });
 
 it('needs a branch name without a terminal', function () {

@@ -58,6 +58,10 @@ $ lwt add fix/login-redirect -n --db=copy
 - **Cleans up all of it.** `lwt remove` refuses a worktree with uncommitted or untracked files, drops the database
   and unlinks the site it made, removes the worktree, offers to delete the branch (only a merged one without
   asking twice), runs `git worktree prune`, and removes an emptied parent such as `.claude/worktrees/`.
+- **Submodules don't get in the way, or get lost.** git won't remove a worktree with an initialized submodule
+  without `--force`, which deletes that submodule's repository. `lwt remove` passes `--force` only for such a
+  worktree, and only when the worktree and every submodule are clean, with no commits or stashes a remote doesn't
+  have; otherwise it refuses and names what would be lost.
 - **Shows the commands it runs**, so you can see, and learn, exactly what a worktree needs.
 
 ## Install
@@ -89,6 +93,9 @@ on the remote is checked out tracking it.
 
 `lwt setup` is for worktrees something else made: plain `git worktree add`, git-prompt's Worktrees tab, or an
 AI agent's worktree in `.claude/worktrees/`. It is safe to run again; whatever is already in place is kept.
+
+`lwt remove` given a worktree's full path works from any folder; a branch name is looked up in the repository you
+are in.
 
 ### Options
 
@@ -131,7 +138,9 @@ lwt remove feat/export -n --drop-db --delete-branch
 ```
 
 The exit code is non-zero when anything asked for didn't happen (a database that couldn't be created, a failed
-install or migration, or `App\` loading from outside the worktree).
+install or migration, or `App\` loading from outside the worktree). A project's post-checkout hook isn't something
+lwt was asked to run: git reports its failure even though the worktree is complete, so `lwt add` prints a `!`
+warning, carries on with the setup, and lets the setup decide the exit code.
 
 ## Tests stay on the shared test database
 

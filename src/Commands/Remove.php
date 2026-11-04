@@ -10,13 +10,14 @@ use Phattarachai\WorktreePrompt\Git;
 use Phattarachai\WorktreePrompt\Runner;
 use Phattarachai\WorktreePrompt\State;
 use Phattarachai\WorktreePrompt\UserError;
+use Phattarachai\WorktreePrompt\WorktreeSetup;
 
 use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\select;
 
 /**
- * `lwt remove [path|branch]`: the whole cleanup, not just the folder. Refuses a dirty worktree; drops the
- * database lwt made; offers to delete the branch; prunes; removes an emptied parent folder.
+ * `lwt remove [path|branch]`: the whole cleanup, not just the folder. Refuses a dirty worktree (its submodules
+ * included); drops the database lwt made; offers to delete the branch; prunes; removes an emptied parent folder.
  */
 class Remove extends Command
 {
@@ -24,9 +25,9 @@ class Remove extends Command
 
     public function __invoke(array $args): int
     {
-        $main = $this->mainCheckout();
-        $mainGit = new Git($this->runner, $main);
         $target = self::argument($args);
+        $main = $this->repository($target);
+        $mainGit = new Git($this->runner, $main);
         $deleteBranch = self::flag($args, '--delete-branch') ? true : (self::flag($args, '--keep-branch') ? false : null);
         $dropDatabase = self::flag($args, '--drop-db') ? true : (self::flag($args, '--keep-db') ? false : null);
         $admin = self::option($args, 'db-admin');
@@ -46,17 +47,14 @@ class Remove extends Command
         $git = new Git($this->runner, $path);
         $missing = ! is_dir($path);
 
-        if (! $missing && ($dirty = $git->status()) !== []) {
-            throw new UserError("{$path} has ".count($dirty).' uncommitted or untracked file(s) — commit or delete them first (git -C '.escapeshellarg($path).' status).');
-        }
-
+        $force = ! $missing && $this->refuseUnlessClean($git);
         $state = $missing ? [] : State::read($git);
         $env = EnvFile::read(is_file("{$path}/.env") ? "{$path}/.env" : "{$main}/.env");
         $database = $this->databaseToDrop($state, $env, $main, $path, $dropDatabase)?->administeredBy($admin ?? $state['database']['admin'] ?? null);
 
         $removed = $missing
             ? $this->console->run(['git', 'worktree', 'prune'], $main)
-            : $this->console->run(['git', 'worktree', 'remove', $path], $main);
+            : $this->console->run(['git', 'worktree', 'remove', ...($force ? ['--force'] : []), $path], $main);
 
         if ($removed->failed()) {
             return 1;
@@ -84,6 +82,91 @@ class Remove extends Command
     }
 
     /**
+     * A worktree's own path says which repository it belongs to, wherever this runs from; a branch or folder name
+     * is looked up in the repository here.
+     */
+    private function repository(?string $target): string
+    {
+        $folder = $target === null ? '' : $this->absolute($target);
+        $git = new Git($this->runner, $folder);
+
+        return is_dir($folder) && realpath($folder) === $git->topLevel() ? $git->mainCheckout() : $this->mainCheckout();
+    }
+
+    /**
+     * Whether `git worktree remove` needs --force: it refuses any worktree with a populated submodule or a submodule
+     * repository in its admin folder, clean or not. --force skips its own checks too and deletes those repositories,
+     * so it is only true after every check it would have made, and the ones it wouldn't, have passed.
+     */
+    private function refuseUnlessClean(Git $git): bool
+    {
+        $status = $git->status();
+        $submodules = $git->submodules();
+        $own = array_diff_key($status, array_flip($submodules));
+
+        $problems = [
+            ...($own === [] ? [] : [self::files($own, 'it')]),
+            ...$this->submoduleProblems($git, $status, $submodules),
+        ];
+
+        if ($problems !== []) {
+            throw new UserError("Not removing {$git->cwd}: ".implode('; ', $problems).' — commit, push or delete them first (git -C '.escapeshellarg($git->cwd).' status).');
+        }
+
+        return $submodules !== [] || is_dir($git->gitDir().'/modules');
+    }
+
+    /**
+     * What deleting this worktree's submodules would lose, by name.
+     *
+     * @param  array<string, string>  $status  the worktree's own status
+     * @param  list<string>  $submodules
+     * @return list<string>
+     */
+    private function submoduleProblems(Git $git, array $status, array $submodules): array
+    {
+        $problems = [];
+        $names = [];
+
+        foreach ($submodules as $path) {
+            $submodule = new Git($this->runner, "{$git->cwd}/{$path}");
+            $files = $submodule->status();
+            $names[(string) realpath($submodule->gitDir())] = $path;
+
+            if ($files !== []) {
+                $problems[] = self::files($files, $path);
+            } elseif (isset($status[$path])) {
+                $problems[] = "{$path} is on a commit this worktree hasn't committed";
+            }
+        }
+
+        $modules = (string) realpath($git->gitDir()).'/modules/';
+
+        foreach (array_unique([...array_keys($names), ...$git->submoduleRepositories()]) as $repository) {
+            $name = $names[$repository] ?? str_replace($modules, '', $repository).' (not checked out)';
+            $submodule = new Git($this->runner, $repository);
+
+            if (($commits = $submodule->commitsOnlyHere()) > 0) {
+                $problems[] = "{$name} has {$commits} commit(s) no remote has";
+            }
+
+            if ($submodule->refExists('refs/stash')) {
+                $problems[] = "{$name} has a stash";
+            }
+        }
+
+        return $problems;
+    }
+
+    /**
+     * @param  array<string, string>  $files
+     */
+    private static function files(array $files, string $where): string
+    {
+        return "{$where} has ".count($files).' uncommitted or untracked file(s): '.WorktreeSetup::listed(array_keys($files));
+    }
+
+    /**
      * @return array{path: string, branch: ?string, head: string, bare: bool, locked: bool, prunable: bool}
      */
     private function pick(Git $git, ?string $target): array
@@ -91,7 +174,7 @@ class Remove extends Command
         $worktrees = array_slice($git->worktrees(), 1);
 
         if ($worktrees === []) {
-            throw new UserError('This repository has no worktrees besides the main checkout.');
+            throw new UserError("{$git->cwd} has no worktrees besides the main checkout.");
         }
 
         if ($target !== null) {
@@ -103,7 +186,7 @@ class Remove extends Command
                 }
             }
 
-            throw new UserError("No worktree matches '{$target}' — git worktree list shows them.");
+            throw new UserError("No worktree of {$git->cwd} matches '{$target}' — git worktree list shows them.");
         }
 
         if (! Runner::interactive()) {

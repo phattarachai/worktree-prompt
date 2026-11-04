@@ -602,7 +602,7 @@ final class WorktreeSetup
     /**
      * @param  list<string>  $paths
      */
-    private static function listed(array $paths): string
+    public static function listed(array $paths): string
     {
         return implode(', ', array_slice($paths, 0, 8)).(count($paths) > 8 ? ' …' : '');
     }

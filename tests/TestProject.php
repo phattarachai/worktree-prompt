@@ -72,6 +72,56 @@ final class TestProject
         self::exec($other, ['git', 'push', '--quiet', 'origin', $branch]);
     }
 
+    /**
+     * A submodule at `$path`, committed and pushed, from a bare `<root>/<name>.git` of its own.
+     */
+    public function submodule(string $path = 'lib', string $name = 'lib', ?string $in = null): void
+    {
+        $in ??= $this->path;
+        self::repository($this->root, $name);
+        self::exec($in, ['git', '-c', 'protocol.file.allow=always', 'submodule', '--quiet', 'add', "{$this->root}/{$name}.git", $path]);
+        self::exec($in, ['git', '-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '--quiet', '-m', "Add {$path}"]);
+        self::exec($in, ['git', 'push', '--quiet', 'origin', 'HEAD']);
+    }
+
+    /**
+     * `git submodule update --init --recursive`: a worktree starts with its submodules empty.
+     */
+    public static function initSubmodules(string $worktree): void
+    {
+        self::exec($worktree, ['git', '-c', 'protocol.file.allow=always', 'submodule', '--quiet', 'update', '--init', '--recursive']);
+    }
+
+    /**
+     * A commit in any checkout, whoever its configured author is.
+     */
+    public static function commit(string $checkout, string $file, string $contents = "work\n"): void
+    {
+        file_put_contents("{$checkout}/{$file}", $contents);
+        self::exec($checkout, ['git', 'add', '--all']);
+        self::exec($checkout, ['git', '-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '--quiet', '-m', "Add {$file}"]);
+    }
+
+    /**
+     * A bare `<root>/<name>.git` with one commit on main.
+     */
+    private static function repository(string $root, string $name): void
+    {
+        self::exec($root, ['git', 'init', '--quiet', '--bare', '--initial-branch=main', "{$name}.git"]);
+        self::exec($root, ['git', 'clone', '--quiet', "{$name}.git", "{$name}-seed"]);
+        self::exec("{$root}/{$name}-seed", ['git', 'switch', '--quiet', '-c', 'main']);
+        self::commit("{$root}/{$name}-seed", 'lib.txt', "lib\n");
+        self::exec("{$root}/{$name}-seed", ['git', 'push', '--quiet', 'origin', 'main']);
+    }
+
+    /**
+     * A post-checkout hook shared by every worktree, that prints something and exits with `$exitCode`.
+     */
+    public function postCheckoutHook(int $exitCode): void
+    {
+        chmod($this->write('.git/hooks/post-checkout', "#!/bin/sh\necho 'sync: hook went wrong' >&2\nexit {$exitCode}\n"), 0755);
+    }
+
     public function git(string ...$arguments): string
     {
         return self::exec($this->path, ['git', ...$arguments]);

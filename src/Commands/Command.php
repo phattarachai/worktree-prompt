@@ -33,8 +33,14 @@ abstract class Command
 
     protected function mainCheckout(): string
     {
+        $hint = "cd into the project (lwt remove also takes a worktree's full path).";
+
+        if ($this->cwd === '') {
+            throw new UserError("The current folder no longer exists — {$hint}");
+        }
+
         if (! $this->git->isRepository()) {
-            throw new UserError('Not inside a git repository.');
+            throw new UserError("Not inside a git repository — {$hint}");
         }
 
         return $this->git->mainCheckout();
