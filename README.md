@@ -50,7 +50,8 @@ $ lwt add fix/login-redirect -n --db=copy
 - **Everything else git doesn't carry:** the gitignored `storage/` and `bootstrap/cache` folders (without
   `storage/framework/views` every Blade render fails with *Please provide a valid cache path*), `public/build`
   and `bootstrap/ssr` (views that read the Vite manifest), the `public/storage` link, untracked `.env.*` files,
-  and, when you ask for Node, `node_modules` (copied when the lockfile matches, a clean `npm ci` when it
+  Wayfinder's generated `resources/js/{actions,routes,wayfinder}` (`php artisan wayfinder:generate` with the flags
+  your `wayfinder({...})` Vite plugin passes, so Vitest and builds can import `@/routes`), and, when you ask for Node, `node_modules` (copied when the lockfile matches, a clean `npm ci` when it
   doesn't) plus a project-local `.cache/puppeteer`.
 - **A site of its own.** The default folder sits beside the main checkout (`../shop-login-redirect`), so a
   parked folder serves it as `shop-login-redirect.test`. `APP_URL` moves to it, with `SESSION_DOMAIN`,

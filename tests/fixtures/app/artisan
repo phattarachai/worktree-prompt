@@ -1,7 +1,8 @@
 #!/usr/bin/env php
 <?php
 
-// Stands in for Laravel's artisan: --version boots the autoloader, migrate records how it was called.
+// Stands in for Laravel's artisan: --version boots the autoloader, migrate records how it was called,
+// wayfinder:generate writes resources/js/routes/index.ts with its arguments.
 require __DIR__.'/vendor/autoload.php';
 
 $arguments = array_slice($argv, 1);
@@ -13,6 +14,12 @@ if (($arguments[0] ?? '') === '--version') {
 
 if (($arguments[0] ?? '') === 'migrate') {
     file_put_contents(__DIR__.'/.migrated', implode(' ', $arguments).' DB_DATABASE='.getenv('DB_DATABASE'));
+    exit(0);
+}
+
+if (($arguments[0] ?? '') === 'wayfinder:generate') {
+    @mkdir(__DIR__.'/resources/js/routes', recursive: true);
+    file_put_contents(__DIR__.'/resources/js/routes/index.ts', '// '.implode(' ', $arguments)."\n");
     exit(0);
 }
 

@@ -22,6 +22,9 @@ final class WorktreeSetup
     /** @var list<string> build output a test or a page render reads; public/hot is left out, it points at the main checkout's Vite */
     private const array BUILD_OUTPUT = ['public/build', 'bootstrap/ssr'];
 
+    /** @var list<string> where @laravel/vite-plugin-wayfinder's options live */
+    private const array VITE_CONFIGS = ['vite.config.ts', 'vite.config.js', 'vite.config.mts', 'vite.config.mjs'];
+
     /** @var array<string, array{0: list<string>, 1: string}> lockfile => [clean install, package manager] */
     private const array NODE_LOCKFILES = [
         'package-lock.json' => [['npm', 'ci'], 'npm'],
@@ -68,6 +71,10 @@ final class WorktreeSetup
         $node = $this->node($options);
         $this->worktreeInclude();
         $this->storageLink();
+
+        if ($vendor) {
+            $this->wayfinder();
+        }
 
         if ($vendor && $database !== null) {
             $this->migrate($database, $options);
@@ -499,6 +506,71 @@ final class WorktreeSetup
 
         $this->console->run(['ln', '-s', "{$this->path}/storage/app/public", $link], $this->path);
         $this->console->done('public/storage — linked to this worktree\'s storage/app/public (empty: uploads stay in the main checkout)');
+    }
+
+    /**
+     * Wayfinder's TypeScript (resources/js/actions, routes, wayfinder) is gitignored and written by its Vite plugin
+     * while `npm run dev` runs, so a new worktree has none and every import of `@/routes` fails (Vitest, tsc, a
+     * build). Generate it for this branch's routes, with the flags the project's Vite plugin passes.
+     */
+    private function wayfinder(): void
+    {
+        if (! is_dir("{$this->path}/vendor/laravel/wayfinder")) {
+            return;
+        }
+
+        $vite = $this->viteWayfinderOptions();
+        $base = trim($vite['path'] ?? 'resources/js', '/');
+        $generated = array_map(fn (string $dir) => "{$base}/{$dir}", ['actions', 'routes', 'wayfinder']);
+
+        if (array_filter($generated, fn (string $dir) => is_dir("{$this->path}/{$dir}")) !== []) {
+            $this->console->skip('Wayfinder — already generated, kept');
+
+            return;
+        }
+
+        if (array_filter($generated, fn (string $dir) => $this->git->isIgnored($dir)) === []) {
+            return;
+        }
+
+        $command = ['php', 'artisan', 'wayfinder:generate', ...$vite['flags']];
+
+        $this->console->run($command, $this->path, 'Generating Wayfinder routes')->successful()
+            ? $this->console->done("{$base}/{actions,routes,wayfinder} — ".implode(' ', array_slice($command, 2)).' (gitignored; the Vite plugin keeps it current while npm run dev runs)')
+            : $this->console->warn(implode(' ', $command).' failed — run it yourself before npm test or a build: imports of @/routes fail without it.');
+    }
+
+    /**
+     * The options of `wayfinder({...})` in the Vite config, as the plugin turns them into flags.
+     *
+     * @return array{flags: list<string>, path: ?string}
+     */
+    private function viteWayfinderOptions(): array
+    {
+        $config = '';
+
+        foreach (self::VITE_CONFIGS as $file) {
+            if (is_file("{$this->path}/{$file}")) {
+                $config = (string) file_get_contents("{$this->path}/{$file}");
+
+                break;
+            }
+        }
+
+        $options = preg_match('/\bwayfinder\s*\(\s*\{(.*?)\}\s*\)/s', $config, $match) === 1 ? $match[1] : '';
+        $is = fn (string $key, string $value) => preg_match("/\\b{$key}\\s*:\\s*{$value}\\b/", $options) === 1;
+        $path = preg_match('/\bpath\s*:\s*[\'"`]([^\'"`]+)[\'"`]/', $options, $found) === 1 ? $found[1] : null;
+
+        return [
+            'flags' => array_values(array_filter([
+                $is('skipDatabase', 'true') ? '--skip-database' : null,
+                $is('actions', 'false') ? '--skip-actions' : null,
+                $is('routes', 'false') ? '--skip-routes' : null,
+                $is('formVariants', 'true') ? '--with-form' : null,
+                $path === null ? null : "--path={$path}",
+            ])),
+            'path' => $path,
+        ];
     }
 
     /**
