@@ -104,6 +104,34 @@ it('creates the storage folders git doesn\'t keep', function () {
     }
 });
 
+it('generates Wayfinder\'s gitignored routes with the flags the Vite plugin passes', function () {
+    $project = project();
+    $project->write('vendor/laravel/wayfinder/composer.json', '{}');
+    $project->write('vite.config.ts', "import { wayfinder } from '@laravel/vite-plugin-wayfinder';\nexport default { plugins: [wayfinder({ formVariants: true, actions: false })] };\n");
+    $project->git('add', '--all');
+    $project->git('commit', '--quiet', '-m', 'Wayfinder');
+    $project->git('push', '--quiet');
+    $worktree = $project->worktree('feat/x');
+
+    [$code, $output] = lwt(['setup', '-n'], $worktree);
+    [, $again] = lwt(['setup', '-n'], $worktree);
+
+    expect($code)->toBe(0)
+        ->and(file_get_contents("{$worktree}/resources/js/routes/index.ts"))->toBe("// wayfinder:generate --skip-actions --with-form\n")
+        ->and($output)->toContain('resources/js/{actions,routes,wayfinder} — wayfinder:generate --skip-actions --with-form')
+        ->and($again)->toContain('Wayfinder — already generated, kept')
+        ->and(TestProject::exec($worktree, ['git', 'status', '--porcelain']))->toBe('');
+});
+
+it('leaves Wayfinder alone in a project without it', function () {
+    $worktree = project()->worktree('feat/x');
+
+    lwt(['setup', '-n'], $worktree);
+
+    expect($this->runner->ran('php', 'artisan', 'wayfinder:generate'))->toBeFalse()
+        ->and(is_dir("{$worktree}/resources/js/routes"))->toBeFalse();
+});
+
 it('copies public/build for the Vite manifest, but never public/hot', function () {
     $project = project();
     $project->write('public/build/manifest.json', '{}');
