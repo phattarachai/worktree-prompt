@@ -10,6 +10,8 @@ use function Laravel\Prompts\confirm;
  * Makes a worktree of a Laravel project runnable: everything git doesn't carry (vendor, .env, storage,
  * build output, node_modules, optionally a database of its own) comes from the main checkout or gets
  * installed, and nothing git does carry is left changed.
+ *
+ * @phpstan-import-type Data from State
  */
 final class WorktreeSetup
 {
@@ -244,11 +246,12 @@ final class WorktreeSetup
         $current = Database::fromEnv($env, $this->path);
         $state = State::read($this->git);
         $unfinished = $source !== null && ($state['unfinishedCopy']['driver'] ?? null) === $source->driver ? $source->named($state['unfinishedCopy']['name']) : null;
+        $made = self::madeDatabase($state, $source);
 
         $this->summary['database'] = match (true) {
             $current === null => 'the main checkout\'s',
             $source !== null && $unfinished?->describe() === $current->describe() => $this->describeUnfinished($source, $current),
-            default => $current->describe().' — shared with the main checkout',
+            default => $current->describe().' — '.$this->whose($current, $source, $made),
         };
 
         if ($options->database === 'shared') {
@@ -267,13 +270,15 @@ final class WorktreeSetup
             return null;
         }
 
+        $kept = $current === null || $current->isSameAs($source) ? 'kept the shared database' : "kept {$current->database}";
+
         if (! $source->isLocal() && ! (Runner::interactive() && confirm("DB_HOST={$source->host} is not this machine. Create a database there anyway?", default: false))) {
-            $this->problem("DB_HOST={$source->host} is not this machine — kept the shared database. Point .env at a local server first.");
+            $this->problem("DB_HOST={$source->host} is not this machine — {$kept}. Point .env at a local server first.");
 
             return null;
         }
 
-        $target = ($unfinished ?? $this->targetDatabase($source, $options))->administeredBy($options->databaseAdmin);
+        $target = ($unfinished ?? $made ?? $this->targetDatabase($source, $options))->administeredBy($options->databaseAdmin);
         $copy = null;
 
         if ($source->isSqlite() && $target->database === $source->database) {
@@ -282,9 +287,8 @@ final class WorktreeSetup
 
         try {
             $exists = $target->exists();
-            $made = ($state['database']['name'] ?? null) === $target->database;
 
-            if ($exists && ! $made && ! $target->isSqlite()) {
+            if ($exists && $made?->database !== $target->database && ! $target->isSqlite()) {
                 $this->console->warn("{$target->database} already exists and lwt didn't make it — using it as is, and lwt remove won't drop it.");
             }
 
@@ -306,10 +310,12 @@ final class WorktreeSetup
                 }
 
                 $this->console->done("database — created {$target->describe()}");
+            } elseif ($copy === null) {
+                $this->console->skip("database — {$target->database} already there, kept".($options->database === 'copy' ? ' (nothing copied into it)' : ''));
             }
         } catch (PDOException $exception) {
             $hint = Database::isPermissionError($exception) && $target->admin === null ? " Rerun with --db-admin=root (or postgres): it creates the database and grants it to {$target->username}." : '';
-            $this->problem("Could not create {$target->database}: {$exception->getMessage()} — kept the shared database.{$hint}");
+            $this->problem("Could not create {$target->database}: {$exception->getMessage()} — {$kept}.{$hint}");
 
             return null;
         } catch (UserError $exception) {
@@ -333,9 +339,39 @@ final class WorktreeSetup
             State::merge($this->git, ['unfinishedCopy' => null]);
         }
 
-        $this->summary['database'] = $target->describe().($options->database === 'copy' ? " — a copy of {$source->database}" : ' — its own, migrated');
+        $this->summary['database'] = $target->describe().($copy !== null ? " — a copy of {$source->database}" : ' — its own, migrated');
 
         return $target;
+    }
+
+    /**
+     * The database lwt already made for this worktree: `lwt add` named it after the branch, which a later `lwt setup`
+     * can't tell from the folder. Null when there is none, or when the main checkout is on it by now.
+     *
+     * @param  Data  $state
+     */
+    private static function madeDatabase(array $state, ?Database $source): ?Database
+    {
+        $made = $state['database'] ?? null;
+
+        return $made !== null && $source !== null && $made['driver'] === $source->driver && $made['name'] !== $source->database
+            ? $source->named($made['name'])
+            : null;
+    }
+
+    /**
+     * Whose database the worktree's .env points at.
+     */
+    private function whose(Database $current, ?Database $source, ?Database $made): string
+    {
+        $inside = $current->isSqlite() && str_starts_with($current->database, $this->path.'/');
+
+        return match (true) {
+            $source !== null && $current->isSameAs($source) => 'shared with the main checkout',
+            $inside && ! $current->exists() => 'its own, not created yet',
+            $inside, $made !== null && $current->isSameAs($made) => 'its own',
+            default => 'not the main checkout\'s',
+        };
     }
 
     private function targetDatabase(Database $source, SetupOptions $options): Database

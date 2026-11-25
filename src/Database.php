@@ -107,6 +107,16 @@ final readonly class Database
             || str_ends_with($host, '.localhost');
     }
 
+    /**
+     * The same database on the same server; `localhost`, `127.0.0.1` and a socket are all this machine.
+     */
+    public function isSameAs(self $other): bool
+    {
+        return $this->isSqlite() === $other->isSqlite()
+            && $this->database === $other->database
+            && ($this->isSqlite() || ($this->port === $other->port && ($this->host === $other->host || ($this->isLocal() && $other->isLocal()))));
+    }
+
     public function describe(): string
     {
         if ($this->isSqlite()) {
