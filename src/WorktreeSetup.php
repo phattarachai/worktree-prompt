@@ -279,6 +279,7 @@ final class WorktreeSetup
         }
 
         $target = ($unfinished ?? $made ?? $this->targetDatabase($source, $options))->administeredBy($options->databaseAdmin);
+        $reference = ['driver' => $target->driver, 'name' => $target->database];
         $copy = null;
 
         if ($source->isSqlite() && $target->database === $source->database) {
@@ -289,7 +290,8 @@ final class WorktreeSetup
             $exists = $target->exists();
 
             if ($exists && $made?->database !== $target->database && ! $target->isSqlite()) {
-                $this->console->warn("{$target->database} already exists and lwt didn't make it — using it as is, and lwt remove won't drop it.");
+                $foreign = "{$target->database} already exists and lwt didn't make it — using it as is, and lwt remove won't drop it.";
+                $options->database === 'copy' ? $this->problem("{$foreign} Nothing was copied into it.") : $this->console->warn($foreign);
             }
 
             // Whoever repaired a copy that stopped part-way would lose that work, so only an empty one is filled again.
@@ -303,6 +305,7 @@ final class WorktreeSetup
 
             if (! $exists) {
                 $target->create();
+                State::merge($this->git, ['madeEmpty' => $options->database === 'empty' ? $reference : null]);
 
                 // A SQLite file inside the worktree goes with the folder; anything else lwt remove drops.
                 if (! str_starts_with($target->database, $this->path.'/')) {
@@ -310,6 +313,8 @@ final class WorktreeSetup
                 }
 
                 $this->console->done("database — created {$target->describe()}");
+            } elseif ($options->database === 'copy' && ($state['madeEmpty'] ?? null) === $reference && $unfinished === null) {
+                $this->problem("{$target->database} was made empty, not as a copy of {$source->database} — nothing was copied into it. Drop it and run this again, or lwt remove --drop-db and add the worktree again.");
             } elseif ($copy === null) {
                 $this->console->skip("database — {$target->database} already there, kept".($options->database === 'copy' ? ' (nothing copied into it)' : ''));
             }
@@ -336,7 +341,7 @@ final class WorktreeSetup
         }
 
         if ($copy !== null || $unfinished !== null) {
-            State::merge($this->git, ['unfinishedCopy' => null]);
+            State::merge($this->git, ['unfinishedCopy' => null, 'madeEmpty' => $copy === null ? $reference : null]);
         }
 
         $this->summary['database'] = $target->describe().($copy !== null ? " — a copy of {$source->database}" : ' — its own, migrated');

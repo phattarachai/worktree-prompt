@@ -255,3 +255,67 @@ it('does not say it kept the shared database when the server of its own can\'t b
         ->and($output)->toContain('Connection refused — kept shop_x')
         ->and($output)->toContain('mysql shop_x on 127.0.0.1:3306 — its own');
 });
+
+it('fails when it is asked for a copy of a database it made empty', function () {
+    $project = shop('pgsql');
+    $server = FakeServer::start('99.1');
+    usePath(postgresTools("{$project->root}/tools", '99.1').":{$this->path}");
+    lwt(['add', 'feat/x', '-n', '--db=empty'], $project->path);
+    $worktree = "{$project->root}/app-x";
+
+    [$code, $output] = lwt(['setup', '-n', '--db=copy'], $worktree);
+    [$empty] = lwt(['setup', '-n', '--db=empty'], $worktree);
+    $server->exec('DELETE FROM pg_database');
+    [$dropped, $copied] = lwt(['setup', '-n', '--db=copy'], $worktree);
+    [$again] = lwt(['setup', '-n', '--db=copy'], $worktree);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain('shop_x was made empty, not as a copy of shop — nothing was copied into it')
+        ->and($output)->toContain('shop_x on 127.0.0.1:5432 — its own, migrated')
+        ->and($empty)->toBe(0)
+        ->and($dropped)->toBe(0)
+        ->and($copied)->toContain('shop_x on 127.0.0.1:5432 — a copy of shop')
+        ->and($again)->toBe(0);
+});
+
+it('fails the same way for a SQLite file it made empty inside the worktree', function () {
+    $project = project();
+    $project->write('database/database.sqlite', 'main data');
+    $worktree = $project->worktree('feat/x');
+    lwt(['setup', '-n', '--db=empty'], $worktree);
+
+    [$code, $output] = lwt(['setup', '-n', '--db=copy'], $worktree);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain('nothing was copied into it')
+        ->and(file_get_contents("{$worktree}/database/database.sqlite"))->not->toBe('main data');
+});
+
+it('knows a database a failed copy left empty was then used as an empty one', function () {
+    $project = shop('pgsql');
+    FakeServer::start('99.1');
+    $tools = postgresTools("{$project->root}/tools", '99.1', 'exit 1');
+    usePath("{$tools}:{$this->path}");
+    lwt(['add', 'feat/x', '-n', '--db=copy'], $project->path);
+    $worktree = "{$project->root}/app-x";
+    lwt(['setup', '-n', '--db=empty'], $worktree);
+    postgresTools($tools, '99.1');
+
+    [$code, $output] = lwt(['setup', '-n', '--db=copy'], $worktree);
+
+    expect($code)->toBe(1)
+        ->and($output)->toContain('shop_x was made empty, not as a copy of shop');
+});
+
+it('fails when the database it should copy into is there and lwt did not make it', function (string $db, int $expected) {
+    $project = shop('mysql');
+    $server = FakeServer::start('8.4.9');
+    $server->exec('CREATE DATABASE `shop_x`');
+    usePath(tools("{$project->root}/tools", ['mysqldump' => 'echo "SELECT 1;"', 'mysql' => 'cat > /dev/null']).":{$this->path}");
+
+    [$code, $output] = lwt(['add', 'feat/x', '-n', "--db={$db}"], $project->path);
+
+    expect($code)->toBe($expected)
+        ->and($server->created)->toBe(['shop_x'])
+        ->and($output)->toContain('shop_x already exists and lwt didn\'t make it');
+})->with([['copy', 1], ['empty', 0]]);

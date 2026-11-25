@@ -3,11 +3,11 @@
 namespace Phattarachai\WorktreePrompt;
 
 /**
- * What lwt made for a worktree (its database, whether the copy into it failed, the base it branched from), kept in the worktree's own git admin
+ * What lwt made for a worktree (its database, whether the copy into it failed or it was made empty, the base it branched from), kept in the worktree's own git admin
  * folder (`.git/worktrees/<name>/worktree-prompt.json`): outside the working tree, never committed,
  * and gone when git removes the worktree.
  *
- * @phpstan-type Data array{database?: array{driver: string, name: string, host: string, port: string, admin?: string}, unfinishedCopy?: ?array{driver: string, name: string}, base?: string}
+ * @phpstan-type Data array{database?: array{driver: string, name: string, host: string, port: string, admin?: string}, unfinishedCopy?: ?array{driver: string, name: string}, madeEmpty?: ?array{driver: string, name: string}, base?: string}
  */
 final class State
 {

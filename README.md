@@ -152,6 +152,9 @@ When `--db=copy` fails after the database was created, the worktree's `.env` poi
 don't run, and the summary says it is `EMPTY` or `INCOMPLETE`. `lwt setup --db=copy` copies again into an empty one; one
 that already has tables is left alone, in case someone repaired it: `lwt remove --drop-db`, then add it again.
 
+A database `lwt` already made for the worktree is kept. `--db=copy` copies nothing into one that `--db=empty` made, or
+that lwt didn't make, and fails.
+
 ## Tests stay on the shared test database
 
 The app gets a database of its own with `--db`; the tests don't. Projects that pin their test database by name
