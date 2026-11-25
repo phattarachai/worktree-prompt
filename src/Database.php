@@ -107,6 +107,16 @@ final readonly class Database
             || str_ends_with($host, '.localhost');
     }
 
+    /**
+     * The same database on the same server; `localhost`, `127.0.0.1` and a socket are all this machine.
+     */
+    public function isSameAs(self $other): bool
+    {
+        return $this->isSqlite() === $other->isSqlite()
+            && $this->database === $other->database
+            && ($this->isSqlite() || ($this->port === $other->port && ($this->host === $other->host || ($this->isLocal() && $other->isLocal()))));
+    }
+
     public function describe(): string
     {
         if ($this->isSqlite()) {
@@ -230,11 +240,20 @@ final readonly class Database
     }
 
     /**
+     * The server's version, as it says it: `18.6 (Homebrew)`.
+     */
+    public function serverVersion(): string
+    {
+        return (string) $this->pdo()->getAttribute(PDO::ATTR_SERVER_VERSION);
+    }
+
+    /**
      * The pipeline that copies this database's schema and rows into `$target`, which must exist and be empty.
      *
+     * @param  ?string  $tools  the folder with Postgres's client tools; null takes the first on the PATH
      * @return array{script: string, shown: string, env: array<string, string>, tools: list<string>}
      */
-    public function copyTo(self $target): array
+    public function copyTo(self $target, ?string $tools = null): array
     {
         if ($this->isSqlite()) {
             $command = 'cp '.escapeshellarg($this->database).' '.escapeshellarg($target->database);
@@ -244,8 +263,9 @@ final readonly class Database
 
         if ($this->driver === 'pgsql') {
             $connection = array_merge($this->host === '' ? [] : ['--host', $this->host], ['--port', $this->port, '--username', $this->username]);
-            $dump = ['pg_dump', '--no-owner', '--no-privileges', ...$connection, $this->database];
-            $restore = ['psql', '--quiet', '--set', 'ON_ERROR_STOP=1', ...$connection, '--dbname', $target->database];
+            $prefix = $tools === null ? '' : "{$tools}/";
+            $dump = ["{$prefix}pg_dump", '--no-owner', '--no-privileges', ...$connection, $this->database];
+            $restore = ["{$prefix}psql", '--quiet', '--set', 'ON_ERROR_STOP=1', ...$connection, '--dbname', $target->database];
 
             return self::pipeline($dump, $restore, ['PGPASSWORD' => $this->password]);
         }
@@ -295,12 +315,12 @@ final readonly class Database
         [$username, $password] = $this->admin === null ? [$this->username, $this->password] : [$this->admin, (string) getenv('LWT_DB_ADMIN_PASSWORD')];
 
         if ($this->driver !== 'pgsql') {
-            return new PDO("mysql:{$host}", $username, $password, $options);
+            return Connector::open("mysql:{$host}", $username, $password, $options);
         }
 
         foreach ($database === null ? ['postgres', 'template1'] : [$database] as $maintenance) {
             try {
-                return new PDO("pgsql:{$host}dbname={$maintenance}", $username, $password, $options);
+                return Connector::open("pgsql:{$host}dbname={$maintenance}", $username, $password, $options);
             } catch (PDOException $exception) {
                 $failure = $exception;
             }

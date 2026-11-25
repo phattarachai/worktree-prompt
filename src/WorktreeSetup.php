@@ -10,6 +10,8 @@ use function Laravel\Prompts\confirm;
  * Makes a worktree of a Laravel project runnable: everything git doesn't carry (vendor, .env, storage,
  * build output, node_modules, optionally a database of its own) comes from the main checkout or gets
  * installed, and nothing git does carry is left changed.
+ *
+ * @phpstan-import-type Data from State
  */
 final class WorktreeSetup
 {
@@ -242,7 +244,15 @@ final class WorktreeSetup
         $source = Database::fromEnv(EnvFile::read("{$this->main}/.env"), $this->main);
 
         $current = Database::fromEnv($env, $this->path);
-        $this->summary['database'] = $current === null ? 'the main checkout\'s' : $current->describe().' — shared with the main checkout';
+        $state = State::read($this->git);
+        $unfinished = $source !== null && ($state['unfinishedCopy']['driver'] ?? null) === $source->driver ? $source->named($state['unfinishedCopy']['name']) : null;
+        $made = self::madeDatabase($state, $source);
+
+        $this->summary['database'] = match (true) {
+            $current === null => 'the main checkout\'s',
+            $source !== null && $unfinished?->describe() === $current->describe() => $this->describeUnfinished($source, $current),
+            default => $current->describe().' — '.$this->whose($current, $source, $made),
+        };
 
         if ($options->database === 'shared') {
             return null;
@@ -260,14 +270,16 @@ final class WorktreeSetup
             return null;
         }
 
+        $kept = $current === null || $current->isSameAs($source) ? 'kept the shared database' : "kept {$current->database}";
+
         if (! $source->isLocal() && ! (Runner::interactive() && confirm("DB_HOST={$source->host} is not this machine. Create a database there anyway?", default: false))) {
-            $this->problem("DB_HOST={$source->host} is not this machine — kept the shared database. Point .env at a local server first.");
+            $this->problem("DB_HOST={$source->host} is not this machine — {$kept}. Point .env at a local server first.");
 
             return null;
         }
 
-        $target = $this->targetDatabase($source, $env, $options)->administeredBy($options->databaseAdmin);
-        $state = State::read($this->git);
+        $target = ($unfinished ?? $made ?? $this->targetDatabase($source, $options))->administeredBy($options->databaseAdmin);
+        $copy = null;
 
         if ($source->isSqlite() && $target->database === $source->database) {
             throw new UserError('DB_DATABASE points at the main checkout\'s SQLite file — lwt would share it, not copy it.');
@@ -275,11 +287,19 @@ final class WorktreeSetup
 
         try {
             $exists = $target->exists();
-            $made = ($state['database']['name'] ?? null) === $target->database;
 
-            if ($exists && ! $made && ! $target->isSqlite()) {
+            if ($exists && $made?->database !== $target->database && ! $target->isSqlite()) {
                 $this->console->warn("{$target->database} already exists and lwt didn't make it — using it as is, and lwt remove won't drop it.");
             }
+
+            // Whoever repaired a copy that stopped part-way would lose that work, so only an empty one is filled again.
+            if ($exists && $unfinished !== null && self::tables($target) !== 0) {
+                $this->problem("An earlier copy of {$source->database} into {$target->database} failed part-way — not copying or migrating over what is there. Drop it and run this again, or lwt remove --drop-db and add the worktree again.");
+
+                return null;
+            }
+
+            $copy = $options->database === 'copy' && (! $exists || $unfinished !== null) ? $this->copyPipeline($source, $target) : null;
 
             if (! $exists) {
                 $target->create();
@@ -290,10 +310,16 @@ final class WorktreeSetup
                 }
 
                 $this->console->done("database — created {$target->describe()}");
+            } elseif ($copy === null) {
+                $this->console->skip("database — {$target->database} already there, kept".($options->database === 'copy' ? ' (nothing copied into it)' : ''));
             }
         } catch (PDOException $exception) {
             $hint = Database::isPermissionError($exception) && $target->admin === null ? " Rerun with --db-admin=root (or postgres): it creates the database and grants it to {$target->username}." : '';
-            $this->problem("Could not create {$target->database}: {$exception->getMessage()} — kept the shared database.{$hint}");
+            $this->problem("Could not create {$target->database}: {$exception->getMessage()} — {$kept}.{$hint}");
+
+            return null;
+        } catch (UserError $exception) {
+            $this->problem("Not copying {$source->database}: {$exception->getMessage()} Nothing was created, and .env still has the database it had.");
 
             return null;
         }
@@ -303,16 +329,52 @@ final class WorktreeSetup
             $env->set('DB_DATABASE', $target->database)->save();
         }
 
-        if ($options->database === 'copy' && ! $exists) {
-            $this->copyData($source, $target);
+        if ($copy !== null && ! $this->copyData($source, $target, $copy)) {
+            $this->summary['database'] = $this->describeUnfinished($source, $target);
+
+            return null;
         }
 
-        $this->summary['database'] = $target->describe().($options->database === 'copy' ? " — a copy of {$source->database}" : ' — its own, migrated');
+        if ($copy !== null || $unfinished !== null) {
+            State::merge($this->git, ['unfinishedCopy' => null]);
+        }
+
+        $this->summary['database'] = $target->describe().($copy !== null ? " — a copy of {$source->database}" : ' — its own, migrated');
 
         return $target;
     }
 
-    private function targetDatabase(Database $source, EnvFile $env, SetupOptions $options): Database
+    /**
+     * The database lwt already made for this worktree: `lwt add` named it after the branch, which a later `lwt setup`
+     * can't tell from the folder. Null when there is none, or when the main checkout is on it by now.
+     *
+     * @param  Data  $state
+     */
+    private static function madeDatabase(array $state, ?Database $source): ?Database
+    {
+        $made = $state['database'] ?? null;
+
+        return $made !== null && $source !== null && $made['driver'] === $source->driver && $made['name'] !== $source->database
+            ? $source->named($made['name'])
+            : null;
+    }
+
+    /**
+     * Whose database the worktree's .env points at.
+     */
+    private function whose(Database $current, ?Database $source, ?Database $made): string
+    {
+        $inside = $current->isSqlite() && str_starts_with($current->database, $this->path.'/');
+
+        return match (true) {
+            $source !== null && $current->isSameAs($source) => 'shared with the main checkout',
+            $inside && ! $current->exists() => 'its own, not created yet',
+            $inside, $made !== null && $current->isSameAs($made) => 'its own',
+            default => 'not the main checkout\'s',
+        };
+    }
+
+    private function targetDatabase(Database $source, SetupOptions $options): Database
     {
         $slug = $options->slug ?? basename($this->path);
 
@@ -327,22 +389,66 @@ final class WorktreeSetup
             : dirname($source->database).'/'.Database::nameFor(pathinfo($source->database, PATHINFO_FILENAME), $slug).'.sqlite');
     }
 
-    private function copyData(Database $source, Database $target): void
+    /**
+     * @return array{script: string, shown: string, env: array<string, string>, tools: list<string>}
+     */
+    private function copyPipeline(Database $source, Database $target): array
     {
-        $copy = $source->copyTo($target);
-        $missing = array_values(array_filter($copy['tools'], fn (string $tool) => ! $this->console->runner->has($tool)));
+        $runner = $this->console->runner;
 
-        if ($missing !== []) {
-            $this->problem('Copying the data needs '.implode(' and ', $missing).' on your PATH — the new database is empty; migrations will run on it.');
-
-            return;
+        if ($source->driver === 'pgsql') {
+            return $source->copyTo($target, PostgresTools::folderFor($target->serverVersion(), $runner, $this->path));
         }
+
+        $copy = $source->copyTo($target);
+        $missing = array_values(array_filter($copy['tools'], fn (string $tool) => ! $runner->has($tool)));
+
+        return $missing === [] ? $copy : throw new UserError('it needs '.implode(' and ', $missing).' on your PATH.');
+    }
+
+    /**
+     * @param  array{script: string, shown: string, env: array<string, string>, tools: list<string>}  $copy
+     */
+    private function copyData(Database $source, Database $target, array $copy): bool
+    {
+        // Until the copy is complete, so that a run that fails (or is stopped) is still known to the next one.
+        State::merge($this->git, ['unfinishedCopy' => ['driver' => $target->driver, 'name' => $target->database]]);
 
         $result = $this->console->shell($copy['script'], $this->path, $copy['shown'], "Copying {$source->database} into {$target->database}", $copy['env']);
 
-        $result->successful()
-            ? $this->console->done("data — copied {$source->database} into {$target->database}")
-            : $this->problem("Copying into {$target->database} failed part-way — check it before relying on it, or lwt remove and try again.");
+        if ($result->failed()) {
+            $retry = self::tables($target) === 0 ? 'lwt setup --db=copy tries again' : 'lwt remove --drop-db and add the worktree again';
+            $this->problem("Copying {$source->database} into {$target->database} failed — not migrated, don't rely on it. Once the cause is fixed, {$retry}.");
+
+            return false;
+        }
+
+        $this->console->done("data — copied {$source->database} into {$target->database}");
+
+        return true;
+    }
+
+    private function describeUnfinished(Database $source, Database $target): string
+    {
+        $state = match ($tables = self::tables($target)) {
+            null => 'INCOMPLETE',
+            0 => 'EMPTY',
+            default => "INCOMPLETE ({$tables} tables)",
+        };
+
+        return "{$target->describe()} — {$state}: the copy of {$source->database} failed";
+    }
+
+    /**
+     * Null when the database isn't there or can't be read.
+     */
+    private static function tables(Database $database): ?int
+    {
+        try {
+            return $database->tableCount();
+        } catch (PDOException) {
+            return null;
+        }
     }
 
     private function migrate(Database $database, SetupOptions $options): void

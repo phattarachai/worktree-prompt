@@ -23,7 +23,8 @@ $ lwt add fix/login-redirect -n --db=copy
   ✓ vendor — a real copy of the main checkout's (composer.lock is the same), never a symlink
   ✓ APP_URL — http://shop-login-redirect.test
   ✓ database — created pgsql shop_db_login_redirect on 127.0.0.1:5432
-  → pg_dump --no-owner --no-privileges … shop_db | psql --quiet --set ON_ERROR_STOP=1 … --dbname shop_db_login_redirect
+  → /opt/homebrew/bin/pg_dump --no-owner --no-privileges … shop_db | /opt/homebrew/bin/psql --quiet --set ON_ERROR_STOP=1 … --dbname shop_db_login_redirect
+  ✓ data — copied shop_db into shop_db_login_redirect
   ✓ public/build — copied from the main checkout
   → php artisan migrate --force --no-interaction
   ✓ Laravel Framework 13.33.0 — App\ loads from this worktree
@@ -43,7 +44,8 @@ $ lwt add fix/login-redirect -n --db=copy
 - **A database of its own when the branch needs one.** `--db=copy` creates `<db>_<branch>` and copies the main
   database into it (`pg_dump | psql`, `mysqldump | mysql`, or the SQLite file), `--db=empty` migrates a new
   one. Either way the branch's migrations then run on *that* database, never on the shared one. When the branch
-  already changes `database/migrations`, the prompt suggests a copy.
+  already changes `database/migrations`, the prompt suggests a copy. A copy that fails is never migrated or called
+  a copy.
 - **Nothing tracked is changed.** It never writes over a tracked file (a committed `.env.testing` stays as it
   is). Composer scripts that republish `public/` assets, or an install that rewrites a lockfile, are put back with
   `git restore` at the end, and new untracked files are listed.
@@ -77,7 +79,10 @@ Then put Composer's global bin on your `PATH`, or alias it:
 alias lwt="$HOME/.composer/vendor/bin/lwt"
 ```
 
-Needs PHP 8.3+, git, and `pg_dump`/`psql` or `mysqldump`/`mysql` on your `PATH` for `--db=copy`.
+Needs PHP 8.3+, git, and for `--db=copy` `mysqldump`/`mysql` on your `PATH`, or a `pg_dump`/`psql` of the Postgres
+server's major version or newer. With several installed, lwt asks the server for its version and takes the ones that
+match it best: your `PATH` first, then Homebrew's `postgresql@NN` and Debian's `/usr/lib/postgresql/NN`. When none
+fits, it says so and creates no database.
 
 ## Usage
 
@@ -138,10 +143,14 @@ lwt add feat/export -n --db=copy  # a branch with migrations gets a database of 
 lwt remove feat/export -n --drop-db --delete-branch
 ```
 
-The exit code is non-zero when anything asked for didn't happen (a database that couldn't be created, a failed
-install or migration, or `App\` loading from outside the worktree). A project's post-checkout hook isn't something
+The exit code is non-zero when anything asked for didn't happen (a database that couldn't be created or copied, a
+failed install or migration, or `App\` loading from outside the worktree). A project's post-checkout hook isn't something
 lwt was asked to run: git reports its failure even though the worktree is complete, so `lwt add` prints a `!`
 warning, carries on with the setup, and lets the setup decide the exit code.
+
+When `--db=copy` fails after the database was created, the worktree's `.env` points at that database, the migrations
+don't run, and the summary says it is `EMPTY` or `INCOMPLETE`. `lwt setup --db=copy` copies again into an empty one; one
+that already has tables is left alone, in case someone repaired it: `lwt remove --drop-db`, then add it again.
 
 ## Tests stay on the shared test database
 
